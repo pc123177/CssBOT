@@ -2,11 +2,16 @@ import json
 import os
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from urllib import parse, request
+
+from history import append_history, load_history, render_dashboard, save_history
 
 BASE_URL = "https://cssdeals.com"
 API_URL = f"{BASE_URL}/api/product?fields=1&page=1&pageSize=20"
 STATE_FILE = "seen_ids.json"
+HISTORY_FILE = "docs/history.json"
+DASHBOARD_FILE = "docs/index.html"
 
 
 @dataclass(frozen=True)
@@ -111,6 +116,7 @@ def main() -> None:
         return
 
     new_products = find_new_products(products, seen_ids, send_all=send_all)
+    history = load_history(HISTORY_FILE)
     for product in reversed(new_products):
         translated = Product(
             product.id,
@@ -123,6 +129,13 @@ def main() -> None:
         send_telegram(translated, token, chat_id)
         seen_ids.add(product.id)
         save_seen_ids(seen_ids)
+        history = append_history(history, translated, datetime.now(timezone.utc).isoformat())
+        os.makedirs("docs", exist_ok=True)
+        save_history(HISTORY_FILE, history)
+
+    os.makedirs("docs", exist_ok=True)
+    with open(DASHBOARD_FILE, "w", encoding="utf-8") as dashboard:
+        dashboard.write(render_dashboard(history))
     print(f"Monitoramento concluído: {len(new_products)} item(ns) novo(s).")
 
 
