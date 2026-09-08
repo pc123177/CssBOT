@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib import parse, request
@@ -12,6 +13,20 @@ API_URL = f"{BASE_URL}/api/product?fields=1&page=1&pageSize=20"
 STATE_FILE = "seen_ids.json"
 HISTORY_FILE = "docs/history.json"
 DASHBOARD_FILE = "docs/index.html"
+PRICE_FILE = "prices.json"
+HEALTH_FILE = "health.json"
+SETTINGS_FILE = "settings.json"
+TELEGRAM_FILE = "telegram_state.json"
+
+
+def retry(operation, attempts: int = 3, base_delay: float = 1, sleep=time.sleep):
+    for attempt in range(attempts):
+        try:
+            return operation()
+        except Exception:
+            if attempt == attempts - 1:
+                raise
+            sleep(base_delay * (2 ** attempt))
 
 
 @dataclass(frozen=True)
@@ -22,6 +37,34 @@ class Product:
     sku: str
     image: str
     url: str
+    source_link: str = ""
+    sale_platform: str = ""
+    quantity: str = ""
+
+
+def _csv(value: str) -> list[str]:
+    return [part.strip().lower() for part in value.split(",") if part.strip()]
+
+
+def apply_filters(products: list[Product], include: str = "", exclude: str = "",
+                  max_price: str = "", platforms: str = "") -> list[Product]:
+    includes, excludes, allowed = _csv(include), _csv(exclude), _csv(platforms)
+    limit = float(max_price) if max_price else None
+    return [p for p in products if
+            (not includes or any(word in p.title.lower() for word in includes)) and
+            not any(word in p.title.lower() for word in excludes) and
+            (limit is None or float(p.price) <= limit) and
+            (not allowed or p.sale_platform.lower() in allowed)]
+
+
+def get_price_drops(products: list[Product], prices: dict[str, str]) -> list[tuple[Product, str]]:
+    drops = []
+    for product in products:
+        old = prices.get(product.id)
+        if old is not None and float(product.price) < float(old):
+            drops.append((product, old))
+        prices[product.id] = product.price
+    return drops
 
 
 def find_new_products(products: list[Product], seen_ids: set[str], send_all: bool = False) -> list[Product]:
@@ -30,29 +73,42 @@ def find_new_products(products: list[Product], seen_ids: set[str], send_all: boo
     return [product for product in products if product.id not in seen_ids]
 
 
-def fetch_products() -> list[Product]:
-    req = request.Request(API_URL, headers={"User-Agent": "SniperDeals/1.0"})
-    with request.urlopen(req, timeout=30) as response:
-        records = json.loads(response.read())["data"]["records"]
+def _map_product(record: dict) -> Product:
+    sku = record["skus"][0]
+    product_id = str(record["id"])
+    return Product(
+        product_id, record["title"], str(sku["price"]),
+        sku.get("skuNames") or f'{sku.get("color", "")} {sku.get("size", "")}'.strip(),
+        sku["image"], f"{BASE_URL}/product-detail.html?itemid={product_id}",
+        record.get("sourceLink") or record.get("source_link") or "",
+        str(record.get("salePlatform") or record.get("sale_platform") or ""),
+        str(sku.get("quantity") or record.get("quantity") or ""),
+    )
+
+
+def fetch_products(max_pages: int = 1, seen_ids: set[str] | None = None) -> list[Product]:
     products = []
-    for record in records:
-        sku = record["skus"][0]
-        product_id = str(record["id"])
-        products.append(Product(
-            product_id,
-            record["title"],
-            str(sku["price"]),
-            sku.get("skuNames") or f'{sku.get("color", "")} {sku.get("size", "")}'.strip(),
-            sku["image"],
-            f"{BASE_URL}/product-detail.html?itemid={product_id}",
-        ))
+    max_pages = min(max(1, max_pages), 100)
+    for page in range(1, max_pages + 1):
+        url = f"{BASE_URL}/api/product?fields=1&page={page}&pageSize=20"
+        def fetch():
+            req = request.Request(url, headers={"User-Agent": "SniperDeals/1.0"})
+            with request.urlopen(req, timeout=30) as response:
+                return json.loads(response.read())["data"]["records"]
+        records = retry(fetch)
+        page_products = [_map_product(record) for record in records]
+        products.extend(page_products)
+        if not records or len(records) < 20:
+            break
+        if seen_ids and all(product.id in seen_ids for product in page_products):
+            break
     return products
 
 
 def _translate_libre(text: str) -> str:
     query = parse.urlencode({"q": text, "source": "auto", "target": "pt"})
     req = request.Request("http://127.0.0.1:5000/translate", data=query.encode(), headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "SniperDeals/1.0"})
-    with request.urlopen(req, timeout=15) as response:
+    with retry(lambda: request.urlopen(req, timeout=15)) as response:
         data = json.loads(response.read())
     translated = data.get("translatedText")
     return translated if translated and not translated.startswith("[") else text
@@ -61,7 +117,7 @@ def _translate_libre(text: str) -> str:
 def _translate_google(text: str) -> str:
     query = parse.urlencode({"client": "gtx", "sl": "auto", "tl": "pt", "dt": "t", "q": text})
     req = request.Request(f"https://translate.googleapis.com/translate_a/single?{query}", headers={"User-Agent": "Mozilla/5.0"})
-    with request.urlopen(req, timeout=20) as response:
+    with retry(lambda: request.urlopen(req, timeout=20)) as response:
         data = json.loads(response.read())
     return "".join(part[0] for part in data[0])
 
@@ -89,22 +145,31 @@ def format_message(product: Product) -> str:
         "🎯 Novo item no CSSDeals!\n\n"
         f"📦 {product.title}\n"
         f"💴 ¥{product.price}\n"
-        f"📏 {product.sku or 'Não informado'}\n\n"
+        f"📏 {product.sku or 'Não informado'}\n"
+        f"🏪 {product.sale_platform or 'Não informado'}\n"
+        f"🔢 Quantidade: {product.quantity or 'Não informada'}\n\n"
         f"🔗 {product.url}"
+        + (f"\n🔗 Link original: {product.source_link}" if product.source_link else "")
     )
 
 
-def send_telegram(product: Product, token: str, chat_id: str) -> None:
-    data = parse.urlencode({
-        "chat_id": chat_id,
-        "photo": product.image,
-        "caption": format_message(product),
-    }).encode()
-    req = request.Request(f"https://api.telegram.org/bot{token}/sendPhoto", data=data)
-    with request.urlopen(req, timeout=30) as response:
-        result = json.loads(response.read())
-    if not result.get("ok"):
-        raise RuntimeError(f"Telegram rejeitou o alerta: {result}")
+def _telegram_call(url: str, data: bytes) -> None:
+    def send():
+        with request.urlopen(request.Request(url, data=data), timeout=30) as response:
+            result = json.loads(response.read())
+        if not result.get("ok"):
+            raise RuntimeError(f"Telegram rejeitou o alerta: {result}")
+    retry(send)
+
+
+def send_telegram(product: Product, token: str, chat_id: str, message: str | None = None) -> None:
+    message = message or format_message(product)
+    photo_data = parse.urlencode({"chat_id": chat_id, "photo": product.image, "caption": message}).encode()
+    try:
+        _telegram_call(f"https://api.telegram.org/bot{token}/sendPhoto", photo_data)
+    except Exception:
+        text_data = parse.urlencode({"chat_id": chat_id, "text": message}).encode()
+        _telegram_call(f"https://api.telegram.org/bot{token}/sendMessage", text_data)
 
 
 def load_seen_ids() -> set[str]:
@@ -121,6 +186,116 @@ def save_seen_ids(ids: set[str]) -> None:
         state.write("\n")
 
 
+def load_json(path: str, default):
+    try:
+        with open(path, encoding="utf-8") as state:
+            return json.load(state)
+    except FileNotFoundError:
+        return default
+
+
+def save_json(path: str, value) -> None:
+    with open(path, "w", encoding="utf-8") as state:
+        json.dump(value, state, ensure_ascii=False, indent=2)
+        state.write("\n")
+
+
+def load_health(path: str = HEALTH_FILE) -> dict:
+    return load_json(path, {"failure_count": 0, "last_success": None, "last_failure": None, "last_error": None})
+
+
+def record_failure(state: dict, error: str, at: str) -> None:
+    state["failure_count"] = state.get("failure_count", 0) + 1
+    state["last_failure"], state["last_error"] = at, str(error)
+
+
+def record_success(state: dict, at: str) -> None:
+    state["failure_count"], state["last_success"] = 0, at
+
+
+def status_report(state: dict) -> str:
+    return ("📊 Status diário SniperDeals\n"
+            f"Falhas consecutivas: {state.get('failure_count', 0)}\n"
+            f"Último sucesso: {state.get('last_success') or 'nunca'}\n"
+            f"Última falha: {state.get('last_failure') or 'nenhuma'}")
+
+
+def should_alert_failure(state: dict, threshold: int = 3) -> bool:
+    count = state.get("failure_count", 0)
+    if count < threshold or state.get("last_alerted_failure") == count:
+        return False
+    state["last_alerted_failure"] = count
+    return True
+
+
+def mark_daily_report_if_due(state: dict, at: str) -> bool:
+    day = at[:10]
+    if state.get("last_report_date") == day:
+        return False
+    state["last_report_date"] = day
+    return True
+
+
+def handle_command(text: str, health: dict, history: list[dict], settings: dict) -> str:
+    command, _, argument = text.strip().partition(" ")
+    command = command.lower().split("@", 1)[0]
+    if command == "/status":
+        return status_report(health)
+    if command == "/ultimos":
+        if not history:
+            return "Nenhum item enviado ainda."
+        return "🕘 Últimos itens\n\n" + "\n\n".join(
+            f"📦 {item.get('title', '')}\n💴 ¥{item.get('price', '')}\n🔗 {item.get('url', '')}"
+            for item in history[:5])
+    if command == "/pausar":
+        settings["paused"] = True
+        return "⏸️ Monitoramento pausado."
+    if command == "/retomar":
+        settings["paused"] = False
+        return "▶️ Monitoramento retomado."
+    if command == "/incluir":
+        settings["filter_include"] = argument.strip()
+        return f"✅ Filtro de inclusão: {argument.strip() or 'desativado'}"
+    if command == "/excluir":
+        settings["filter_exclude"] = argument.strip()
+        return f"✅ Filtro de exclusão: {argument.strip() or 'desativado'}"
+    if command == "/precomax":
+        if argument.strip():
+            float(argument.strip())
+        settings["filter_max_price"] = argument.strip()
+        return f"✅ Preço máximo: {argument.strip() or 'desativado'}"
+    if command == "/plataformas":
+        settings["filter_platforms"] = argument.strip()
+        return f"✅ Plataformas: {argument.strip() or 'todas'}"
+    return ("Comandos: /status, /ultimos, /pausar, /retomar, "
+            "/incluir palavras, /excluir palavras, /precomax valor, /plataformas lista")
+
+
+def poll_commands(token: str, chat_id: str, health: dict, history: list[dict],
+                  settings: dict, offset: int = 0) -> int:
+    url = f"https://api.telegram.org/bot{token}/getUpdates?timeout=0&offset={offset}"
+    with retry(lambda: request.urlopen(url, timeout=15)) as response:
+        payload = json.loads(response.read())
+    if not payload.get("ok"):
+        raise RuntimeError(f"Telegram getUpdates falhou: {payload}")
+    next_offset = offset
+    for update in payload.get("result", []):
+        next_offset = max(next_offset, int(update["update_id"]) + 1)
+        message = update.get("message") or {}
+        if str((message.get("chat") or {}).get("id")) != str(chat_id):
+            continue
+        text = message.get("text", "")
+        if not text.startswith("/"):
+            continue
+        try:
+            reply = handle_command(text, health, history, settings)
+        except ValueError:
+            reply = "Valor inválido. Exemplo: /precomax 100"
+        data = parse.urlencode({"chat_id": chat_id, "text": reply}).encode()
+        _telegram_call(f"https://api.telegram.org/bot{token}/sendMessage", data)
+    return next_offset
+
+
 def main() -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
@@ -128,36 +303,82 @@ def main() -> None:
         sys.exit("Defina TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID.")
 
     send_all = os.environ.get("SEND_ALL", "").lower() in ("1", "true", "yes")
-
-    products = fetch_products()
     seen_ids = load_seen_ids()
-    if not seen_ids and not send_all:
-        save_seen_ids({product.id for product in products})
-        print(f"Primeira execução: {len(products)} itens registrados, sem alertas antigos.")
-        return
-
-    new_products = find_new_products(products, seen_ids, send_all=send_all)
+    health = load_health()
     history = load_history(HISTORY_FILE)
-    for product in reversed(new_products):
-        translated = Product(
-            product.id,
-            translate_text(product.title),
-            product.price,
-            translate_text(product.sku),
-            product.image,
-            product.url,
-        )
-        send_telegram(translated, token, chat_id)
-        seen_ids.add(product.id)
-        save_seen_ids(seen_ids)
-        history = append_history(history, translated, datetime.now(timezone.utc).isoformat())
-        os.makedirs("docs", exist_ok=True)
-        save_history(HISTORY_FILE, history)
+    settings = load_json(SETTINGS_FILE, {"paused": False})
+    telegram_state = load_json(TELEGRAM_FILE, {"offset": 0})
+    telegram_state["offset"] = poll_commands(
+        token, chat_id, health, history, settings, int(telegram_state.get("offset", 0)))
+    save_json(SETTINGS_FILE, settings)
+    save_json(TELEGRAM_FILE, telegram_state)
+    if settings.get("paused"):
+        print("Monitoramento pausado pelo Telegram.")
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        max_pages = min(int(os.environ.get("CSSDEALS_MAX_PAGES", "5")), 100)
+        products = fetch_products(max_pages=max_pages, seen_ids=seen_ids)
+        discovered_ids = {product.id for product in products}
+        alert_candidates = apply_filters(
+            products,
+            settings.get("filter_include", os.environ.get("FILTER_INCLUDE", "")),
+            settings.get("filter_exclude", os.environ.get("FILTER_EXCLUDE", "")),
+            settings.get("filter_max_price", os.environ.get("FILTER_MAX_PRICE", "")),
+            settings.get("filter_platforms", os.environ.get("FILTER_PLATFORMS", "")))
+        prices = load_json(PRICE_FILE, {})
+        drops = get_price_drops(alert_candidates, prices)
+        save_json(PRICE_FILE, prices)
+        if not seen_ids and not send_all:
+            save_seen_ids(discovered_ids)
+            record_success(health, now)
+            save_json(HEALTH_FILE, health)
+            print(f"Primeira execução: {len(products)} itens registrados, sem alertas antigos.")
+            return
 
-    os.makedirs("docs", exist_ok=True)
-    with open(DASHBOARD_FILE, "w", encoding="utf-8") as dashboard:
-        dashboard.write(render_dashboard(history))
-    print(f"Monitoramento concluído: {len(new_products)} item(ns) novo(s).")
+        new_products = find_new_products(alert_candidates, seen_ids, send_all=send_all)
+        drop_ids = {product.id: old for product, old in drops if product.id not in {p.id for p in new_products}}
+        history = load_history(HISTORY_FILE)
+        alert_products = new_products + [product for product, _old in drops if product.id in drop_ids]
+        for product in reversed(alert_products):
+            translated = Product(
+                product.id, translate_text(product.title), product.price, translate_text(product.sku),
+                product.image, product.url, product.source_link, product.sale_platform, product.quantity)
+            message = format_message(translated)
+            if product.id in drop_ids:
+                message = f"📉 Queda de preço: ¥{drop_ids[product.id]} → ¥{product.price}\n\n{message}"
+            send_telegram(translated, token, chat_id, message)
+            seen_ids.add(product.id)
+            save_seen_ids(seen_ids)
+            history = append_history(history, translated, datetime.now(timezone.utc).isoformat())
+            os.makedirs("docs", exist_ok=True)
+            save_history(HISTORY_FILE, history)
+
+        seen_ids.update(discovered_ids)
+        save_seen_ids(seen_ids)
+        os.makedirs("docs", exist_ok=True)
+        with open(DASHBOARD_FILE, "w", encoding="utf-8") as dashboard:
+            dashboard.write(render_dashboard(history))
+        record_success(health, now)
+        if int(datetime.now(timezone.utc).strftime("%H")) == int(os.environ.get("DAILY_REPORT_UTC_HOUR", "12")):
+            if mark_daily_report_if_due(health, now):
+                data = parse.urlencode({"chat_id": chat_id, "text": status_report(health)}).encode()
+                _telegram_call(f"https://api.telegram.org/bot{token}/sendMessage", data)
+        save_json(HEALTH_FILE, health)
+        print(f"Monitoramento concluído: {len(new_products)} item(ns) novo(s), {len(drop_ids)} queda(s) de preço.")
+    except Exception as error:
+        record_failure(health, error, now)
+        if should_alert_failure(health, int(os.environ.get("FAILURE_ALERT_THRESHOLD", "3"))):
+            try:
+                data = parse.urlencode({
+                    "chat_id": chat_id,
+                    "text": f"🚨 SniperDeals falhou {health['failure_count']} vezes seguidas.\nErro: {error}",
+                }).encode()
+                _telegram_call(f"https://api.telegram.org/bot{token}/sendMessage", data)
+            except Exception as alert_error:
+                print(f"Falha ao enviar alerta de saúde: {alert_error}")
+        save_json(HEALTH_FILE, health)
+        raise
 
 
 if __name__ == "__main__":

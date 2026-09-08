@@ -1,8 +1,6 @@
 name: Monitorar CSSDeals
 
 on:
-  schedule:
-    - cron: "5-55/10 * * * *"
   workflow_dispatch:
     inputs:
       send_all:

@@ -1,4 +1,15 @@
+import html
 import json
+from urllib.parse import urlsplit
+
+
+def _escape(value) -> str:
+    return html.escape(str(value or ""), quote=True)
+
+
+def _safe_url(value) -> str:
+    value = str(value or "")
+    return _escape(value) if urlsplit(value).scheme in ("http", "https") else ""
 
 
 def append_history(history: list[dict], product, sent_at: str, max_items: int = 100) -> list[dict]:
@@ -9,6 +20,9 @@ def append_history(history: list[dict], product, sent_at: str, max_items: int = 
         "sku": product.sku,
         "image": product.image,
         "url": product.url,
+        "source_link": getattr(product, "source_link", ""),
+        "sale_platform": getattr(product, "sale_platform", ""),
+        "quantity": getattr(product, "quantity", ""),
         "sent_at": sent_at,
     }
     return ([entry] + [item for item in history if item["id"] != product.id])[:max_items]
@@ -34,12 +48,12 @@ def render_dashboard(history: list[dict]) -> str:
     else:
         cards = "\n".join(
             f'''<article class="card">
-  <img src="{item["image"]}" alt="{item["title"]}" loading="lazy">
-  <h2>{item["title"]}</h2>
-  <p class="price">¥{item["price"]}</p>
-  <p class="sku">{item["sku"] or ""}</p>
-  <p class="date">{item["sent_at"]}</p>
-  <a href="{item["url"]}" target="_blank" rel="noopener">Ver no CSSDeals</a>
+  <img src="{_safe_url(item["image"])}" alt="{_escape(item["title"])}" loading="lazy">
+  <h2>{_escape(item["title"])}</h2>
+  <p class="price">¥{_escape(item["price"])}</p>
+  <p class="sku">{_escape(item["sku"])}</p>
+  <p class="date">{_escape(item["sent_at"])}</p>
+  <a href="{_safe_url(item["url"])}" target="_blank" rel="noopener">Ver no CSSDeals</a>
 </article>'''
             for item in history
         )

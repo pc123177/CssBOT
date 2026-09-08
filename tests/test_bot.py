@@ -1,8 +1,168 @@
+import json
 import unittest
 from unittest.mock import Mock, patch
 
-from sniper_deals import Product, fetch_products, find_new_products, format_message, translate_text
+from sniper_deals import (
+    Product, apply_filters, fetch_products, find_new_products, format_message,
+    get_price_drops, handle_command, load_health, mark_daily_report_if_due, poll_commands,
+    record_failure, record_success, retry, send_telegram, should_alert_failure, status_report,
+    translate_text,
+)
 from history import append_history, render_dashboard
+
+
+class RetryTest(unittest.TestCase):
+    def test_retries_with_exponential_backoff(self):
+        calls = []
+        sleeps = []
+
+        def operation():
+            calls.append(1)
+            if len(calls) < 3:
+                raise OSError("temporary")
+            return "ok"
+
+        self.assertEqual("ok", retry(operation, attempts=3, base_delay=2, sleep=sleeps.append))
+        self.assertEqual([2, 4], sleeps)
+
+
+class ProductFeaturesTest(unittest.TestCase):
+    def product(self, id="1", title="Nike shoe", price="80", platform="Taobao"):
+        return Product(id, title, price, "Black 42", "https://img", "https://css/1",
+                       "https://original/1", platform, "3")
+
+    def test_alert_contains_source_platform_and_quantity(self):
+        message = format_message(self.product())
+        self.assertIn("https://original/1", message)
+        self.assertIn("Taobao", message)
+        self.assertIn("3", message)
+
+    def test_filters_products_from_environment_style_values(self):
+        products = [self.product(), self.product("2", "Adidas shoe", "120", "Weidian")]
+        result = apply_filters(products, include="nike", exclude="used", max_price="100", platforms="taobao")
+        self.assertEqual([products[0]], result)
+
+    def test_detects_price_drops_and_updates_prices(self):
+        prices = {"1": "100", "2": "20"}
+        products = [self.product(price="80"), self.product("2", price="25")]
+        drops = get_price_drops(products, prices)
+        self.assertEqual([(products[0], "100")], drops)
+        self.assertEqual({"1": "80", "2": "25"}, prices)
+
+
+class TelegramTest(unittest.TestCase):
+    @patch("sniper_deals.time.sleep")
+    @patch("sniper_deals.request.urlopen")
+    def test_send_photo_retries_then_falls_back_to_message(self, urlopen, _sleep):
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.read.return_value = b'{"ok":true}'
+        urlopen.side_effect = [OSError("photo"), OSError("photo"), OSError("photo"), response]
+        send_telegram(Product("1", "Shoe", "10", "42", "img", "url"), "token", "chat")
+        self.assertEqual(4, urlopen.call_count)
+        self.assertTrue(urlopen.call_args.args[0].full_url.endswith("/sendMessage"))
+
+
+class PaginationTest(unittest.TestCase):
+    @patch("sniper_deals.time.sleep")
+    @patch("sniper_deals.request.urlopen")
+    def test_fetch_retries_transient_cssdeals_failure(self, urlopen, _sleep):
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.read.return_value = b'{"data":{"records":[]}}'
+        urlopen.side_effect = [OSError("temporary"), response]
+        self.assertEqual([], fetch_products())
+        self.assertEqual(2, urlopen.call_count)
+
+    @patch("sniper_deals.time.sleep")
+    @patch("sniper_deals.request.urlopen")
+    def test_fetches_pages_until_page_contains_only_seen_ids(self, urlopen, _sleep):
+        def response(records):
+            value = Mock()
+            value.__enter__ = Mock(return_value=value)
+            value.__exit__ = Mock(return_value=False)
+            value.read.return_value = json.dumps({"data": {"records": records}}).encode()
+            return value
+        def record(id):
+            return {"id": id, "title": id, "skus": [{"price": 1, "skuNames": "x", "image": "i"}]}
+        first_page = [record("new")] + [record(f"new-{i}") for i in range(19)]
+        urlopen.side_effect = [response(first_page), response([record("old")])]
+        products = fetch_products(max_pages=100, seen_ids={"old"})
+        self.assertEqual("new", products[0].id)
+        self.assertEqual("old", products[-1].id)
+        self.assertEqual(2, urlopen.call_count)
+
+
+class HealthTest(unittest.TestCase):
+    def test_tracks_failures_success_and_formats_report(self):
+        state = load_health("missing-health-test.json")
+        record_failure(state, "boom", "2026-09-08T10:00:00Z")
+        self.assertEqual(1, state["failure_count"])
+        record_success(state, "2026-09-08T11:00:00Z")
+        self.assertEqual(0, state["failure_count"])
+        self.assertIn("2026-09-08T11:00:00Z", status_report(state))
+
+
+    def test_failure_threshold_alerts_once(self):
+        state = {"failure_count": 3, "last_alerted_failure": 0}
+        self.assertTrue(should_alert_failure(state, threshold=3))
+        self.assertFalse(should_alert_failure(state, threshold=3))
+
+    def test_daily_report_is_due_once_per_utc_day(self):
+        state = {"last_report_date": "2026-09-07"}
+        self.assertTrue(mark_daily_report_if_due(state, "2026-09-08T11:00:00+00:00"))
+        self.assertFalse(mark_daily_report_if_due(state, "2026-09-08T18:00:00+00:00"))
+
+
+class CommandTest(unittest.TestCase):
+    def test_status_command_returns_health(self):
+        state = {"failure_count": 0, "last_success": "2026-09-08T11:00:00Z", "last_failure": None}
+        self.assertIn("Último sucesso", handle_command("/status", state, [], {}))
+
+    def test_pause_and_resume_commands_update_settings(self):
+        settings = {"paused": False}
+        self.assertIn("pausado", handle_command("/pausar", {}, [], settings).lower())
+        self.assertTrue(settings["paused"])
+        self.assertIn("retomado", handle_command("/retomar", {}, [], settings).lower())
+        self.assertFalse(settings["paused"])
+
+    def test_latest_command_lists_recent_products(self):
+        history = [{"title": "Tênis", "price": "50", "url": "https://css/1"}]
+        message = handle_command("/ultimos", {}, history, {})
+        self.assertIn("Tênis", message)
+        self.assertIn("https://css/1", message)
+
+    def test_filter_commands_update_settings(self):
+        settings = {}
+        handle_command("/incluir nike,adidas", {}, [], settings)
+        handle_command("/excluir used", {}, [], settings)
+        handle_command("/precomax 100", {}, [], settings)
+        handle_command("/plataformas 1,2", {}, [], settings)
+        self.assertEqual("nike,adidas", settings["filter_include"])
+        self.assertEqual("used", settings["filter_exclude"])
+        self.assertEqual("100", settings["filter_max_price"])
+        self.assertEqual("1,2", settings["filter_platforms"])
+
+    @patch("sniper_deals._telegram_call")
+    @patch("sniper_deals.request.urlopen")
+    def test_polls_only_authorized_chat_and_advances_offset(self, urlopen, telegram_call):
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.read.return_value = json.dumps({"ok": True, "result": [
+            {"update_id": 10, "message": {"chat": {"id": 999}, "text": "/pausar"}},
+            {"update_id": 11, "message": {"chat": {"id": 123}, "text": "/pausar"}},
+        ]}).encode()
+        urlopen.return_value = response
+        settings = {"paused": False}
+
+        offset = poll_commands("token", "123", {}, [], settings, offset=5)
+
+        self.assertEqual(12, offset)
+        self.assertTrue(settings["paused"])
+        telegram_call.assert_called_once()
 
 
 class FindNewProductsTest(unittest.TestCase):
@@ -129,6 +289,15 @@ class DashboardTest(unittest.TestCase):
         self.assertIn("https://img/9.jpg", html)
         self.assertIn("https://cssdeals.com/9", html)
         self.assertIn("2026-09-08T12:00:00Z", html)
+
+    def test_escapes_untrusted_product_markup(self):
+        history = [{"id": "x", "title": "<script>alert(1)</script>", "price": "1",
+                    "sku": "x", "image": "javascript:alert(1)",
+                    "url": "javascript:alert(1)", "sent_at": "now"}]
+        page = render_dashboard(history)
+        self.assertNotIn("<script>", page)
+        self.assertNotIn("javascript:alert", page)
+        self.assertIn("&lt;script&gt;", page)
 
     def test_renders_empty_state_message_without_entries(self):
         html = render_dashboard([])
