@@ -8,12 +8,22 @@ set +a
 python3 -m unittest discover -s tests -v
 python3 sniper_deals.py
 
-# Publica apenas o dashboard; o estado operacional fica na VPS/backups.
+# Publica o dashboard em uma worktree limpa para preservar o estado da VPS.
+PUBLISH_DIR=/home/ubuntu/sniper-deals-publish
 GIT_SSH_COMMAND="ssh -i /home/ubuntu/.ssh/github_deploy -o StrictHostKeyChecking=accept-new" \
   git fetch origin main
-git add -f docs/history.json docs/index.html
-git diff --cached --quiet || git commit -m "chore: atualizar dashboard"
-if [ "$(git rev-list --count origin/main..HEAD)" -gt 0 ]; then
+if [ ! -e "$PUBLISH_DIR/.git" ]; then
+  rm -rf "$PUBLISH_DIR"
+  git worktree add --detach "$PUBLISH_DIR" origin/main
+else
+  git -C "$PUBLISH_DIR" reset --hard origin/main
+fi
+cp docs/history.json docs/index.html "$PUBLISH_DIR/docs/"
+git -C "$PUBLISH_DIR" add docs/history.json docs/index.html
+if ! git -C "$PUBLISH_DIR" diff --cached --quiet; then
+  git -C "$PUBLISH_DIR" config user.name "SniperDeals VPS"
+  git -C "$PUBLISH_DIR" config user.email "bot@sniperdeals.local"
+  git -C "$PUBLISH_DIR" commit -m "chore: atualizar dashboard"
   GIT_SSH_COMMAND="ssh -i /home/ubuntu/.ssh/github_deploy -o StrictHostKeyChecking=accept-new" \
-    git push origin HEAD:main
+    git -C "$PUBLISH_DIR" push origin HEAD:main
 fi
