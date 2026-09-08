@@ -49,17 +49,38 @@ def fetch_products() -> list[Product]:
     return products
 
 
+def _translate_libre(text: str) -> str:
+    query = parse.urlencode({"q": text, "source": "auto", "target": "pt"})
+    req = request.Request("http://127.0.0.1:5000/translate", data=query.encode(), headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "SniperDeals/1.0"})
+    with request.urlopen(req, timeout=15) as response:
+        data = json.loads(response.read())
+    translated = data.get("translatedText")
+    return translated if translated and not translated.startswith("[") else text
+
+
+def _translate_google(text: str) -> str:
+    query = parse.urlencode({"client": "gtx", "sl": "auto", "tl": "pt", "dt": "t", "q": text})
+    req = request.Request(f"https://translate.googleapis.com/translate_a/single?{query}", headers={"User-Agent": "Mozilla/5.0"})
+    with request.urlopen(req, timeout=20) as response:
+        data = json.loads(response.read())
+    return "".join(part[0] for part in data[0])
+
+
 def translate_text(text: str) -> str:
     if not text:
         return text
-    query = parse.urlencode({"client": "gtx", "sl": "auto", "tl": "pt", "dt": "t", "q": text})
-    req = request.Request(f"https://translate.googleapis.com/translate_a/single?{query}", headers={"User-Agent": "Mozilla/5.0"})
+    # 1) tenta LibreTranslate local (sem rate-limit, roda no servidor)
     try:
-        with request.urlopen(req, timeout=20) as response:
-            data = json.loads(response.read())
-        return "".join(part[0] for part in data[0])
+        translated = _translate_libre(text)
+        if translated != text:
+            return translated
     except Exception as error:
-        print(f"Aviso: tradução falhou ({error}); usando texto original.")
+        print(f"Aviso: LibreTranslate falhou ({error}); tentando Google...")
+    # 2) fallback Google
+    try:
+        return _translate_google(text)
+    except Exception as error:
+        print(f"Aviso: tradução Google falhou ({error}); usando texto original.")
         return text
 
 

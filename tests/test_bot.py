@@ -54,6 +54,37 @@ class FindNewProductsTest(unittest.TestCase):
 
         self.assertEqual("Tênis de corrente", translate_text("Chain Sneakers"))
 
+    @patch("sniper_deals.request.urlopen")
+    def test_translate_prefers_local_libretranslate_over_google(self, urlopen):
+        def fake_open(req, *a, **kw):
+            if req.host.startswith("127.0.0.1"):
+                response = Mock()
+                response.__enter__ = Mock(return_value=response)
+                response.__exit__ = Mock(return_value=False)
+                response.read.return_value = '{"translatedText": "Tênis de corrente"}'.encode()
+                return response
+            raise AssertionError("não deveria chamar o Google quando LibreTranslate funciona")
+
+        urlopen.side_effect = fake_open
+        urlopen.return_value = Mock()
+
+        self.assertEqual("Tênis de corrente", translate_text("Chain Sneakers"))
+
+    @patch("sniper_deals.request.urlopen")
+    def test_translate_falls_back_to_google_when_local_fails(self, urlopen):
+        def fake_open(req, *a, **kw):
+            if req.host.startswith("127.0.0.1"):
+                raise ConnectionError("LibreTranslate fora do ar")
+            response = Mock()
+            response.__enter__ = Mock(return_value=response)
+            response.__exit__ = Mock(return_value=False)
+            response.read.return_value = '[[["Tênis de corrente","Chain Sneakers",null,null,1]]]'.encode()
+            return response
+
+        urlopen.side_effect = fake_open
+
+        self.assertEqual("Tênis de corrente", translate_text("Chain Sneakers"))
+
 
 class HistoryTest(unittest.TestCase):
     def test_prepends_new_entry_and_removes_previous_duplicate(self):
