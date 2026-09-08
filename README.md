@@ -1,4 +1,4 @@
-# SniperDeals
+# CSSBOT
 
 Bot em Python que consulta a API pública do CSSDeals, identifica itens novos, traduz título e variação para português e envia uma foto com os detalhes ao Telegram.
 
