@@ -25,6 +25,13 @@ Bot em Python que consulta a API pública do CSSDeals, identifica itens novos, t
    - `TELEGRAM_CHAT_ID`
 7. Abra **Actions → Monitorar CSSDeals → Run workflow** para inicializar.
 
+## Testar o envio (mandar os itens já registrados)
+
+1. Abra **Actions → Monitorar CSSDeals → Run workflow**.
+2. Marque a opção **"Enviar todos os itens registrados (teste)"**.
+3. Clique em **Run workflow**.
+4. O bot envia os 20 itens atualmente monitorados para o Telegram, confirmando que o token e o Chat ID funcionam.
+
 ## Execução local
 
 ```bash

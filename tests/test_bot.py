@@ -13,6 +13,14 @@ class FindNewProductsTest(unittest.TestCase):
 
         self.assertEqual([products[0]], find_new_products(products, {"2"}))
 
+    def test_send_all_ignores_seen_ids(self):
+        products = [
+            Product("3", "Novo", "50", "43", "https://img/3", "https://cssdeals.com/3"),
+            Product("2", "Antigo", "40", "42", "https://img/2", "https://cssdeals.com/2"),
+        ]
+
+        self.assertEqual(products, find_new_products(products, {"2", "3"}, send_all=True))
+
     @patch("sniper_deals.request.urlopen")
     def test_fetches_and_maps_cssdeals_api(self, urlopen):
         response = Mock()

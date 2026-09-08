@@ -19,7 +19,9 @@ class Product:
     url: str
 
 
-def find_new_products(products: list[Product], seen_ids: set[str]) -> list[Product]:
+def find_new_products(products: list[Product], seen_ids: set[str], send_all: bool = False) -> list[Product]:
+    if send_all:
+        return list(products)
     return [product for product in products if product.id not in seen_ids]
 
 
@@ -99,14 +101,16 @@ def main() -> None:
     if not token or not chat_id:
         sys.exit("Defina TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID.")
 
+    send_all = os.environ.get("SEND_ALL", "").lower() in ("1", "true", "yes")
+
     products = fetch_products()
     seen_ids = load_seen_ids()
-    if not seen_ids:
+    if not seen_ids and not send_all:
         save_seen_ids({product.id for product in products})
         print(f"Primeira execução: {len(products)} itens registrados, sem alertas antigos.")
         return
 
-    new_products = find_new_products(products, seen_ids)
+    new_products = find_new_products(products, seen_ids, send_all=send_all)
     for product in reversed(new_products):
         translated = Product(
             product.id,
