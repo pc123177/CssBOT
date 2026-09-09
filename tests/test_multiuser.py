@@ -28,6 +28,15 @@ class MultiUserBotTest(unittest.TestCase):
         self.assertIn("cadastrado", reply.lower())
         self.assertIsNotNone(self.store.get("123"))
 
+    def test_subscribed_user_can_list_own_recent_deliveries(self):
+        self.store.register("123", "Alice")
+        self.store.mark_sent("123", "p1", "80", title="Nike shoe", url="https://css/p1")
+
+        reply = self.bot.command("123", "Alice", "/ultimos")
+
+        self.assertIn("Nike shoe", reply)
+        self.assertIn("https://css/p1", reply)
+
     def test_subscribed_user_can_manage_preferences_and_stop(self):
         self.store.register("123", "Alice")
         self.bot.command("123", "Alice", "/incluir nike")

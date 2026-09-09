@@ -23,11 +23,18 @@ class UserStore:
                 chat_id TEXT NOT NULL,
                 product_id TEXT NOT NULL,
                 price TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                url TEXT NOT NULL DEFAULT '',
                 sent_at TEXT NOT NULL,
                 PRIMARY KEY (chat_id, product_id),
                 FOREIGN KEY (chat_id) REFERENCES users(chat_id)
             );
         """)
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(deliveries)")}
+        if "title" not in columns:
+            self.db.execute("ALTER TABLE deliveries ADD COLUMN title TEXT NOT NULL DEFAULT ''")
+        if "url" not in columns:
+            self.db.execute("ALTER TABLE deliveries ADD COLUMN url TEXT NOT NULL DEFAULT ''")
         self.db.commit()
 
     @staticmethod
@@ -85,14 +92,23 @@ class UserStore:
                         (self._now(), str(chat_id)))
         self.db.commit()
 
-    def mark_sent(self, chat_id: str, product_id: str, price: str) -> None:
+    def mark_sent(self, chat_id: str, product_id: str, price: str,
+                  title: str = "", url: str = "") -> None:
         self.db.execute("""
-            INSERT INTO deliveries (chat_id, product_id, price, sent_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO deliveries (chat_id, product_id, price, title, url, sent_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(chat_id, product_id) DO UPDATE SET
-                price=excluded.price, sent_at=excluded.sent_at
-        """, (str(chat_id), str(product_id), str(price), self._now()))
+                price=excluded.price, title=excluded.title, url=excluded.url,
+                sent_at=excluded.sent_at
+        """, (str(chat_id), str(product_id), str(price), title, url, self._now()))
         self.db.commit()
+
+    def recent_deliveries(self, chat_id: str, limit: int = 5) -> list[dict]:
+        rows = self.db.execute("""
+            SELECT product_id, title, price, url, sent_at
+            FROM deliveries WHERE chat_id=? ORDER BY sent_at DESC LIMIT ?
+        """, (str(chat_id), limit)).fetchall()
+        return [dict(row) for row in rows]
 
     def was_sent(self, chat_id: str, product_id: str) -> bool:
         row = self.db.execute("SELECT 1 FROM deliveries WHERE chat_id=? AND product_id=?",
