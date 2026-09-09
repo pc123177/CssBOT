@@ -71,6 +71,14 @@ class MultiUserBot:
                     f"Exclusão: {user['exclude'] or 'nenhuma'}\n"
                     f"Preço máximo: {user['max_price'] or 'sem limite'}\n"
                     f"Plataformas: {user['platforms'] or 'todas'}")
+        if command == "/ultimos":
+            deliveries = self.store.recent_deliveries(chat_id)
+            if not deliveries:
+                return "Nenhum item enviado para você ainda."
+            return "🕘 Seus últimos itens\n\n" + "\n\n".join(
+                f"📦 {item['title'] or item['product_id']}\n"
+                f"💴 ¥{item['price']}\n🔗 {item['url']}"
+                for item in deliveries)
         return HELP
 
     def deliver(self, product: Product, allow_new: bool = True) -> int:
@@ -88,6 +96,7 @@ class MultiUserBot:
                 self.sender((user["chat_id"], product, True, old_price))
             else:
                 continue
-            self.store.mark_sent(user["chat_id"], product.id, product.price)
+            self.store.mark_sent(user["chat_id"], product.id, product.price,
+                                 title=product.title, url=product.url)
             sent += 1
         return sent
