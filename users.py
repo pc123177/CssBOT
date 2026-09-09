@@ -11,6 +11,7 @@ class UserStore:
                 chat_id TEXT PRIMARY KEY,
                 name TEXT NOT NULL DEFAULT '',
                 active INTEGER NOT NULL DEFAULT 1,
+                banned INTEGER NOT NULL DEFAULT 0,
                 paused INTEGER NOT NULL DEFAULT 0,
                 include_words TEXT NOT NULL DEFAULT '',
                 exclude_words TEXT NOT NULL DEFAULT '',
@@ -35,6 +36,9 @@ class UserStore:
             self.db.execute("ALTER TABLE deliveries ADD COLUMN title TEXT NOT NULL DEFAULT ''")
         if "url" not in columns:
             self.db.execute("ALTER TABLE deliveries ADD COLUMN url TEXT NOT NULL DEFAULT ''")
+        user_columns = {row[1] for row in self.db.execute("PRAGMA table_info(users)")}
+        if "banned" not in user_columns:
+            self.db.execute("ALTER TABLE users ADD COLUMN banned INTEGER NOT NULL DEFAULT 0")
         self.db.commit()
 
     @staticmethod
@@ -48,11 +52,15 @@ class UserStore:
         user = dict(row)
         user["paused"] = bool(user["paused"])
         user["active"] = bool(user["active"])
+        user["banned"] = bool(user.get("banned", 0))
         user["include"] = user.pop("include_words")
         user["exclude"] = user.pop("exclude_words")
         return user
 
-    def register(self, chat_id: str, name: str = "") -> None:
+    def register(self, chat_id: str, name: str = "") -> bool:
+        existing = self.get(chat_id)
+        if existing and existing["banned"]:
+            return False
         now = self._now()
         self.db.execute("""
             INSERT INTO users (chat_id, name, created_at, updated_at)
@@ -61,6 +69,14 @@ class UserStore:
                 name=excluded.name, active=1, paused=0, updated_at=excluded.updated_at
         """, (str(chat_id), name, now, now))
         self.db.commit()
+        return True
+
+    def ban(self, chat_id: str) -> bool:
+        cursor = self.db.execute(
+            "UPDATE users SET banned=1, active=0, updated_at=? WHERE chat_id=?",
+            (self._now(), str(chat_id)))
+        self.db.commit()
+        return cursor.rowcount > 0
 
     def get(self, chat_id: str) -> dict | None:
         row = self.db.execute("SELECT * FROM users WHERE chat_id=?", (str(chat_id),)).fetchone()

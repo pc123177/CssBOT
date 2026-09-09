@@ -28,6 +28,20 @@ class MultiUserBotTest(unittest.TestCase):
         self.assertIn("cadastrado", reply.lower())
         self.assertIsNotNone(self.store.get("123"))
 
+    def test_command_ignores_group_chats_for_privacy_sensitive_actions(self):
+        reply = self.bot.command("123", "Alice", "/start invite-123", chat_type="group")
+        self.assertIn("privado", reply.lower())
+        self.assertIsNone(self.store.get("123"))
+
+    def test_start_does_not_reactivate_banned_user(self):
+        self.store.register("123", "Alice")
+        self.store.ban("123")
+
+        reply = self.bot.command("123", "Alice", "/start invite-123")
+
+        self.assertIn("bloqueado", reply.lower())
+        self.assertFalse(self.store.get("123")["active"])
+
     def test_subscribed_user_can_list_own_recent_deliveries(self):
         self.store.register("123", "Alice")
         self.store.mark_sent("123", "p1", "80", title="Nike shoe", url="https://css/p1")
@@ -99,6 +113,15 @@ class MultiUserBotTest(unittest.TestCase):
         self.bot.deliver(cheaper)
 
         self.assertEqual(("1", cheaper, True, "100"), self.sent[-1])
+
+    def test_admin_can_check_monitor_health_via_saude_command(self):
+        self.store.register("999", "Admin")
+        health_bot = MultiUserBot(self.store, "invite-123", "999", self.sent.append,
+                                  health_provider=lambda: {"failure_count": 0, "last_success": "now"})
+
+        reply = health_bot.command("999", "Admin", "/saude")
+
+        self.assertIn("Último sucesso: now", reply)
 
 
 if __name__ == "__main__":

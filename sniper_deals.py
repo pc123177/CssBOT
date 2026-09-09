@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -60,84 +61,56 @@ def apply_filters(products: list[Product], include: str = "", exclude: str = "",
 def get_price_drops(products: list[Product], prices: dict[str, str]) -> list[tuple[Product, str]]:
     drops = []
     for product in products:
-        old = prices.get(product.id)
-        if old is not None and float(product.price) < float(old):
-            drops.append((product, old))
+        old_price = prices.get(product.id)
+        if old_price is not None and float(product.price) < float(old_price):
+            drops.append((product, old_price))
         prices[product.id] = product.price
     return drops
 
 
-def find_new_products(products: list[Product], seen_ids: set[str], send_all: bool = False) -> list[Product]:
-    if send_all:
-        return list(products)
-    return [product for product in products if product.id not in seen_ids]
-
-
 def _map_product(record: dict) -> Product:
-    sku = record["skus"][0]
-    product_id = str(record["id"])
+    skus = record.get("skus") or []
+    first_sku = skus[0] if skus else {}
+    price = first_sku.get("price") or record.get("price") or 0
+    if isinstance(price, str):
+        price = price.strip()
+    images = record.get("images") or []
+    image = first_sku.get("image") or (images[0].get("url") if images and isinstance(images[0], dict) else "")
     return Product(
-        product_id, record["title"], str(sku["price"]),
-        sku.get("skuNames") or f'{sku.get("color", "")} {sku.get("size", "")}'.strip(),
-        sku["image"], f"{BASE_URL}/product-detail.html?itemid={product_id}",
-        record.get("sourceLink") or record.get("source_link") or "",
-        str(record.get("salePlatform") or record.get("sale_platform") or ""),
-        str(sku.get("quantity") or record.get("quantity") or ""),
+        id=str(record["id"]),
+        title=record.get("title", ""),
+        price=str(price),
+        sku=first_sku.get("skuNames", first_sku.get("name", "")),
+        image=image,
+        url=f"{BASE_URL}/detail/{record['id']}",
+        source_link=(record.get("sourceLink") or "").strip(),
+        sale_platform=str(record.get("salePlatform", "")),
+        quantity=str(first_sku.get("quantity", "")),
     )
 
 
 def fetch_products(max_pages: int = 1, seen_ids: set[str] | None = None) -> list[Product]:
-    products = []
-    max_pages = min(max(1, max_pages), 100)
+    all_products: list[Product] = []
+    seen = seen_ids or set()
     for page in range(1, max_pages + 1):
         url = f"{BASE_URL}/api/product?fields=1&page={page}&pageSize=20"
-        def fetch():
-            req = request.Request(url, headers={"User-Agent": "SniperDeals/1.0"})
-            with request.urlopen(req, timeout=30) as response:
-                return json.loads(response.read())["data"]["records"]
-        records = retry(fetch)
-        page_products = [_map_product(record) for record in records]
-        products.extend(page_products)
-        if not records or len(records) < 20:
+        response = retry(lambda: request.urlopen(url, timeout=30))
+        with response as response:
+            data = json.loads(response.read())
+        products = [_map_product(record) for record in data.get("data", {}).get("records", [])]
+        all_products.extend(products)
+        if seen and all(product.id in seen for product in products):
             break
-        if seen_ids and all(product.id in seen_ids for product in page_products):
-            break
-    return products
+    return all_products
 
 
-def _translate_libre(text: str) -> str:
-    query = parse.urlencode({"q": text, "source": "auto", "target": "pt"})
-    req = request.Request("http://127.0.0.1:5000/translate", data=query.encode(), headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "SniperDeals/1.0"})
-    with retry(lambda: request.urlopen(req, timeout=15)) as response:
-        data = json.loads(response.read())
-    translated = data.get("translatedText")
-    return translated if translated and not translated.startswith("[") else text
-
-
-def _translate_google(text: str) -> str:
-    query = parse.urlencode({"client": "gtx", "sl": "auto", "tl": "pt", "dt": "t", "q": text})
-    req = request.Request(f"https://translate.googleapis.com/translate_a/single?{query}", headers={"User-Agent": "Mozilla/5.0"})
-    with retry(lambda: request.urlopen(req, timeout=20)) as response:
-        data = json.loads(response.read())
-    return "".join(part[0] for part in data[0])
-
-
-def translate_text(text: str) -> str:
-    if not text:
-        return text
-    # 1) tenta LibreTranslate local (sem rate-limit, roda no servidor)
-    try:
-        translated = _translate_libre(text)
-        if translated != text:
-            return translated
-    except Exception as error:
-        print(f"Aviso: LibreTranslate falhou ({error}); tentando Google...")
-    # 2) fallback Google
-    try:
-        return _translate_google(text)
-    except Exception as error:
-        print(f"Aviso: tradução Google falhou ({error}); usando texto original.")
-        return text
+def find_new_products(products: list[Product], seen_ids: set[str],
+                      send_all: bool = False) -> list[Product]:
+    if send_all:
+        return list(products)
+    new = [product for product in products if product.id not in seen_ids]
+    seen_ids.update(product.id for product in products)
+    return new
 
 
 def format_message(product: Product) -> str:
@@ -190,27 +163,42 @@ def load_json(path: str, default):
     try:
         with open(path, encoding="utf-8") as state:
             return json.load(state)
-    except FileNotFoundError:
+    except (FileNotFoundError, json.JSONDecodeError):
         return default
 
 
 def save_json(path: str, value) -> None:
-    with open(path, "w", encoding="utf-8") as state:
-        json.dump(value, state, ensure_ascii=False, indent=2)
-        state.write("\n")
+    dir_name = os.path.dirname(path) or "."
+    fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as state:
+            json.dump(value, state, ensure_ascii=False, indent=2)
+            state.write("\n")
+            state.flush()
+            os.fsync(state.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def load_health(path: str = HEALTH_FILE) -> dict:
     return load_json(path, {"failure_count": 0, "last_success": None, "last_failure": None, "last_error": None})
 
 
-def record_failure(state: dict, error: str, at: str) -> None:
+def record_failure(state: dict, error: Exception, now: str) -> None:
     state["failure_count"] = state.get("failure_count", 0) + 1
-    state["last_failure"], state["last_error"] = at, str(error)
+    state["last_failure"] = now
+    state["last_error"] = str(error)
 
 
-def record_success(state: dict, at: str) -> None:
-    state["failure_count"], state["last_success"] = 0, at
+def record_success(state: dict, now: str) -> None:
+    state["failure_count"] = 0
+    state["last_success"] = now
+    state["last_error"] = None
 
 
 def status_report(state: dict) -> str:
@@ -296,11 +284,44 @@ def poll_commands(token: str, chat_id: str, health: dict, history: list[dict],
     return next_offset
 
 
+def _translate_libre(text: str) -> str:
+    query = parse.urlencode({"q": text, "source": "auto", "target": "pt"})
+    req = request.Request("http://127.0.0.1:5000/translate", data=query.encode(), headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "SniperDeals/1.0"})
+    with request.urlopen(req, timeout=15) as response:
+        data = json.loads(response.read())
+    translated = data.get("translatedText")
+    return translated if translated and not translated.startswith("[") else text
+
+
+def _translate_google(text: str) -> str:
+    query = parse.urlencode({"client": "gtx", "sl": "auto", "tl": "pt", "dt": "t", "q": text})
+    req = request.Request(f"https://translate.googleapis.com/translate_a/single?{query}", headers={"User-Agent": "Mozilla/5.0"})
+    with request.urlopen(req, timeout=20) as response:
+        data = json.loads(response.read())
+    return "".join(part[0] for part in data[0])
+
+
+def translate_text(text: str) -> str:
+    if not text:
+        return text
+    try:
+        translated = _translate_libre(text)
+        if translated != text:
+            return translated
+    except Exception as error:
+        print(f"Aviso: LibreTranslate falhou ({error}); tentando Google...")
+    try:
+        return _translate_google(text)
+    except Exception as error:
+        print(f"Aviso: tradução Google falhou ({error}); usando texto original.")
+        return text
+
+
 def main() -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
-        sys.exit("Defina TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID.")
+        sys.exit("Defina TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID no .env")
 
     send_all = os.environ.get("SEND_ALL", "").lower() in ("1", "true", "yes")
     seen_ids = load_seen_ids()
@@ -342,16 +363,18 @@ def main() -> None:
         alert_products = new_products + [product for product, _old in drops if product.id in drop_ids]
         for product in reversed(alert_products):
             translated = Product(
-                product.id, translate_text(product.title), product.price, translate_text(product.sku),
-                product.image, product.url, product.source_link, product.sale_platform, product.quantity)
-            message = format_message(translated)
+                product.id, translate_text(product.title), product.price,
+                translate_text(product.sku), product.image, product.url,
+                product.source_link, product.sale_platform, product.quantity,
+            )
             if product.id in drop_ids:
-                message = f"📉 Queda de preço: ¥{drop_ids[product.id]} → ¥{product.price}\n\n{message}"
-            send_telegram(translated, token, chat_id, message)
-            seen_ids.add(product.id)
-            save_seen_ids(seen_ids)
-            history = append_history(history, translated, datetime.now(timezone.utc).isoformat())
-            os.makedirs("docs", exist_ok=True)
+                old_price = drop_ids[product.id]
+                message = f"📉 Queda de preço: ¥{old_price} → ¥{product.price}\n\n{format_message(translated)}"
+                data = parse.urlencode({"chat_id": chat_id, "text": message}).encode()
+                _telegram_call(f"https://api.telegram.org/bot{token}/sendMessage", data)
+            else:
+                send_telegram(translated, token, chat_id)
+            history = append_history(history, product, now)
             save_history(HISTORY_FILE, history)
 
         seen_ids.update(discovered_ids)
