@@ -32,6 +32,40 @@ Bot em Python que consulta a API pública do CSSDeals, identifica itens novos, t
 3. Clique em **Run workflow**.
 4. O bot envia os 20 itens atualmente monitorados para o Telegram, confirmando que o token e o Chat ID funcionam.
 
+## Uso por várias pessoas
+
+O bot aceita inscrições por código de convite. Cada usuário mantém filtros e histórico de entrega separados em SQLite.
+
+1. Defina `INVITE_CODE` no `.env` da VPS.
+2. Compartilhe somente este comando com convidados:
+
+```text
+/start SEU-CODIGO
+```
+
+Comandos dos usuários:
+
+```text
+/status
+/pausar
+/retomar
+/parar
+/incluir nike,adidas
+/excluir used
+/precomax 100
+/plataformas 1,2,3
+```
+
+Comandos exclusivos do administrador:
+
+```text
+/usuarios
+/bloquear CHAT_ID
+/broadcast mensagem
+```
+
+O banco `users.db` e `multiuser_state.json` ficam apenas na VPS e entram no backup diário; não são publicados no GitHub.
+
 ## Execução local
 
 ```bash
