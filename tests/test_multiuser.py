@@ -53,6 +53,14 @@ class MultiUserBotTest(unittest.TestCase):
         self.assertIn("2", reply)
         self.assertEqual([("1", "Manutenção hoje"), ("2", "Manutenção hoje")], self.sent)
 
+    def test_admin_keeps_original_alert_channel_without_duplicate_multiuser_delivery(self):
+        self.store.register("999", "Admin")
+        product = Product("p1", "Shoe", "80", "42", "img", "url")
+
+        self.bot.deliver(product)
+
+        self.assertEqual([], self.sent)
+
     def test_product_is_sent_once_only_to_matching_active_users(self):
         self.store.register("1", "Nike fan")
         self.store.update("1", include="nike", max_price="100")
