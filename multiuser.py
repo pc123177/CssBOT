@@ -95,8 +95,6 @@ class MultiUserBot:
     def deliver(self, product: Product, allow_new: bool = True) -> int:
         sent = 0
         for user in self.store.active_users():
-            if user["chat_id"] == self.admin_chat_id:
-                continue
             if not apply_filters([product], user["include"], user["exclude"],
                                  user["max_price"], user["platforms"]):
                 continue
