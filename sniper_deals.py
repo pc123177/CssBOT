@@ -82,7 +82,7 @@ def _map_product(record: dict) -> Product:
         price=str(price),
         sku=first_sku.get("skuNames", first_sku.get("name", "")),
         image=image,
-        url=f"{BASE_URL}/detail/{record['id']}",
+        url=f"{BASE_URL}/product-detail.html?itemid={record['id']}",
         source_link=(record.get("sourceLink") or "").strip(),
         sale_platform=str(record.get("salePlatform", "")),
         quantity=str(first_sku.get("quantity", "")),
@@ -94,7 +94,8 @@ def fetch_products(max_pages: int = 1, seen_ids: set[str] | None = None) -> list
     seen = seen_ids or set()
     for page in range(1, max_pages + 1):
         url = f"{BASE_URL}/api/product?fields=1&page={page}&pageSize=20"
-        response = retry(lambda: request.urlopen(url, timeout=30))
+        req = request.Request(url, headers={'User-Agent': 'SniperDeals/1.0'})
+        response = retry(lambda: request.urlopen(req, timeout=30))
         with response as response:
             data = json.loads(response.read())
         products = [_map_product(record) for record in data.get("data", {}).get("records", [])]

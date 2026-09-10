@@ -192,7 +192,7 @@ class FindNewProductsTest(unittest.TestCase):
 
         products = fetch_products()
 
-        self.assertEqual(Product("9", "Chain Sneakers", "132.86", "Black 41", "https://img/9.jpg", "https://cssdeals.com/detail/9"), products[0])
+        self.assertEqual(Product("9", "Chain Sneakers", "132.86", "Black 41", "https://img/9.jpg", "https://cssdeals.com/product-detail.html?itemid=9"), products[0])
 
     def test_formats_telegram_message_in_portuguese(self):
         product = Product("9", "Tênis de corrente", "132.86", "Preto 41", "https://img/9.jpg", "https://cssdeals.com/product-detail.html?itemid=9")
